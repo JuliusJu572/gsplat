@@ -365,6 +365,63 @@ rasterize_to_pixels_3dgs_bwd(
     bool absgrad
 );
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+rasterize_to_pixels_3dgs_semantics_fwd(
+    // Gaussian parameters
+    const at::Tensor &means2d,    // [..., N, 2] or [nnz, 2]
+    const at::Tensor &conics,     // [..., N, 3] or [nnz, 3]
+    const at::Tensor &colors,     // [..., N, 3] or [nnz, 3]
+    const at::Tensor &opacities,  // [..., N] or [nnz]
+    const at::Tensor &depths,     // [..., N] or [nnz]
+    const at::Tensor &semantics,  // [..., N, semantic_channels] or [nnz, semantic_channels]
+    const at::optional<at::Tensor> &backgrounds, // [..., 3]
+    const at::optional<at::Tensor> &masks,       // [..., tile_height, tile_width]
+    // image size
+    int64_t image_width,
+    int64_t image_height,
+    int64_t tile_size,
+    // intersections
+    const at::Tensor &tile_offsets, // [..., tile_height, tile_width]
+    const at::Tensor &flatten_ids   // [n_isects]
+);
+
+std::tuple<
+    at::Tensor,
+    at::Tensor,
+    at::Tensor,
+    at::Tensor,
+    at::Tensor,
+    at::Tensor,
+    at::Tensor>
+rasterize_to_pixels_3dgs_semantics_bwd(
+    // Gaussian parameters
+    const at::Tensor &means2d,                   // [..., N, 2] or [nnz, 2]
+    const at::Tensor &conics,                    // [..., N, 3] or [nnz, 3]
+    const at::Tensor &colors,                    // [..., N, 3] or [nnz, 3]
+    const at::Tensor &opacities,                 // [..., N] or [nnz]
+    const at::Tensor &depths,                    // [..., N] or [nnz]
+    const at::Tensor &semantics,                 // [..., N, semantic_channels] or [nnz, semantic_channels]
+    const at::optional<at::Tensor> &backgrounds, // [..., 3]
+    const at::optional<at::Tensor> &masks,       // [..., tile_height, tile_width]
+    // image size
+    int64_t image_width,
+    int64_t image_height,
+    int64_t tile_size,
+    // intersections
+    const at::Tensor &tile_offsets, // [..., tile_height, tile_width]
+    const at::Tensor &flatten_ids,  // [n_isects]
+    // forward outputs
+    const at::Tensor &render_alphas, // [..., image_height, image_width, 1]
+    const at::Tensor &last_ids,      // [..., image_height, image_width]
+    // gradients of outputs
+    const at::Tensor &v_render_colors,    // [..., image_height, image_width, 3]
+    const at::Tensor &v_render_alphas,    // [..., image_height, image_width, 1]
+    const at::Tensor &v_render_depths,    // [..., image_height, image_width, 1]
+    const at::Tensor &v_render_semantics, // [..., image_height, image_width, semantic_channels]
+    // options
+    bool absgrad
+);
+
 // Rasterize 3D Gaussian, but only return the indices of gaussians and pixels.
 std::tuple<at::Tensor, at::Tensor> rasterize_to_indices_3dgs(
     int64_t range_start,

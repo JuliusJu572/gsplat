@@ -42,6 +42,7 @@ from .cuda._wrapper import (
     isect_tiles,
     isect_tiles_lidar,
     rasterize_to_pixels,
+    rasterize_to_pixels_with_semantics,
     rasterize_to_pixels_2dgs,
     rasterize_to_pixels_eval3d,
     rasterize_to_pixels_eval3d_extra,
@@ -308,6 +309,7 @@ def rasterization(
     extra_signals_sh_degree: Optional[
         int
     ] = None,  # Currently only None or 3 is accepted.
+    semantics: Optional[Tensor] = None,  # [..., (C,) N, S], rendered separately.
 ) -> Tuple[Tensor, Tensor, Dict]:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
 
@@ -636,6 +638,31 @@ def rasterization(
     if extra_signals is not None:
         check_features(extra_signals, extra_signals_sh_degree, "extra signals")
 
+    if semantics is not None:
+        check_features(semantics, None, "semantics")
+        if not has_color:
+            raise ValueError("semantics rendering currently requires an RGB render mode.")
+        if D != 3:
+            raise ValueError(
+                f"semantics rendering currently expects RGB colors with 3 channels, got {D}."
+            )
+        if extra_signals is not None:
+            raise ValueError(
+                "semantics cannot be combined with extra_signals in the explicit CUDA path."
+            )
+        if with_eval3d or with_ut:
+            raise ValueError(
+                "semantics rendering is currently implemented only for classic 3DGS."
+            )
+        if distributed:
+            raise ValueError(
+                "semantics rendering is not implemented for distributed rasterization."
+            )
+        if render_mode_has_hit_distance(render_mode):
+            raise ValueError(
+                "semantics rendering supports Gaussian depth modes, not hit-distance modes."
+            )
+
     if absgrad:
         assert not distributed, "AbsGrad is not supported in distributed mode."
 
@@ -901,6 +928,18 @@ def rasterization(
                 else feature_list[0]
             )
 
+    semantic_features = None
+    if semantics is not None:
+        semantic_features = normalize_features_layout(
+            semantics,
+            batch_dims,
+            C,
+            semantics.shape[-1:],
+            batch_ids,
+            camera_ids,
+            gaussian_ids,
+        )
+
     # If in distributed mode, we need to scatter the GSs to the destination ranks, based
     # on which cameras they are visible to, which we already figured out in the projection
     # stage.
@@ -1025,7 +1064,7 @@ def rasterization(
     # Append depth channel to proj_features if needed.
     # Layout is [proj_features(D+E) | depth(1)], with depth always last.
     # In depth-only modes proj_features may not be set yet (no colors, no extra_signals).
-    if render_mode_has_depth_channel(render_mode):
+    if semantics is None and render_mode_has_depth_channel(render_mode):
         if render_mode_has_hit_distance(render_mode):
             depth_channel = torch.zeros_like(
                 depths[..., None]
@@ -1049,7 +1088,7 @@ def rasterization(
                 backgrounds = torch.zeros(
                     (*batch_dims, C, 1), device=backgrounds.device
                 )
-    else:
+    elif semantics is None:
         assert render_mode_has_only_color(render_mode)
 
     assert proj_features is not None
@@ -1108,8 +1147,39 @@ def rasterization(
         }
     )
 
+    render_semantics = None
+
     # print("rank", world_rank, "Before rasterize_to_pixels")
-    if proj_features.shape[-1] > channel_chunk:
+    if semantic_features is not None:
+        if rays is not None:
+            raise ValueError("Rays input is only supported with with_eval3d=True")
+        render_normals = None
+        (
+            render_colors,
+            render_alphas,
+            render_depth,
+            render_semantics,
+        ) = rasterize_to_pixels_with_semantics(
+            means2d,
+            conics,
+            proj_features,
+            opacities,
+            depths,
+            semantic_features,
+            width,
+            height,
+            tile_size,
+            isect_offsets,
+            flatten_ids,
+            backgrounds=backgrounds,
+            packed=packed,
+            absgrad=absgrad,
+        )
+        if render_mode_has_depth_channel(render_mode):
+            if render_mode_has_expected_depth(render_mode):
+                render_depth = render_depth / render_alphas.clamp(min=1e-10)
+            render_colors = torch.cat([render_colors, render_depth], dim=-1)
+    elif proj_features.shape[-1] > channel_chunk:
         # slice into chunks
         n_chunks = (proj_features.shape[-1] + channel_chunk - 1) // channel_chunk
         render_colors, render_alphas = [], []
@@ -1239,7 +1309,9 @@ def rasterization(
                 absgrad=absgrad,
             )
 
-    if extra_signals is not None:
+    if render_semantics is not None:
+        meta["render_semantics"] = render_semantics
+    elif extra_signals is not None:
         # Extract the extra signals (per ray) from render_colors
         E = extra_signals.shape[-1]
         meta["render_extra_signals"] = render_colors[..., D : D + E]

@@ -962,6 +962,109 @@ def rasterize_to_pixels(
     return render_colors, render_alphas
 
 
+def rasterize_to_pixels_with_semantics(
+    means2d: Tensor,  # [..., N, 2] or [nnz, 2]
+    conics: Tensor,  # [..., N, 3] or [nnz, 3]
+    colors: Tensor,  # [..., N, 3] or [nnz, 3]
+    opacities: Tensor,  # [..., N] or [nnz]
+    depths: Tensor,  # [..., N] or [nnz]
+    semantics: Tensor,  # [..., N, S] or [nnz, S]
+    image_width: int,
+    image_height: int,
+    tile_size: int,
+    isect_offsets: Tensor,  # [..., tile_height, tile_width]
+    flatten_ids: Tensor,  # [n_isects]
+    backgrounds: Optional[Tensor] = None,  # [..., 3]
+    masks: Optional[Tensor] = None,  # [..., tile_height, tile_width]
+    packed: bool = False,
+    absgrad: bool = False,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Rasterizes RGB, raw accumulated depth, and semantics in one 3DGS pass."""
+
+    if colors.shape[-1] != 3:
+        raise ValueError(
+            f"semantic rasterization expects RGB colors with 3 channels, got {colors.shape[-1]}"
+        )
+    channels = semantics.shape[-1]
+    if channels > 513 or channels == 0:
+        raise ValueError(f"Unsupported number of semantic channels: {channels}")
+    if packed:
+        assert means2d.shape[:-1] == conics.shape[:-1] == colors.shape[:-1]
+        assert opacities.shape == means2d.shape[:-1]
+        assert depths.shape == means2d.shape[:-1]
+        assert semantics.shape[:-1] == means2d.shape[:-1]
+    else:
+        assert means2d.shape[:-1] == conics.shape[:-1] == colors.shape[:-1]
+        assert opacities.shape == means2d.shape[:-1]
+        assert depths.shape == means2d.shape[:-1]
+        assert semantics.shape[:-1] == means2d.shape[:-1]
+
+    device = means2d.device
+    if channels not in (
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        16,
+        17,
+        24,
+        32,
+        33,
+        64,
+        65,
+        128,
+        129,
+        256,
+        257,
+        512,
+        513,
+    ):
+        padded_channels = (1 << (channels - 1).bit_length()) - channels
+        semantics = torch.cat(
+            [
+                semantics,
+                torch.zeros(*semantics.shape[:-1], padded_channels, device=device),
+            ],
+            dim=-1,
+        )
+    else:
+        padded_channels = 0
+
+    tile_height, tile_width = isect_offsets.shape[-2:]
+    assert (
+        tile_height * tile_size >= image_height
+    ), f"Assert Failed: {tile_height} * {tile_size} >= {image_height}"
+    assert (
+        tile_width * tile_size >= image_width
+    ), f"Assert Failed: {tile_width} * {tile_size} >= {image_width}"
+
+    render_colors, render_alphas, render_depths, render_semantics = (
+        _RasterizeToPixelsWithSemantics.apply(
+            means2d.contiguous(),
+            conics.contiguous(),
+            colors.contiguous(),
+            opacities.contiguous(),
+            depths.contiguous(),
+            semantics.contiguous(),
+            backgrounds.contiguous() if backgrounds is not None else None,
+            masks.contiguous() if masks is not None else None,
+            image_width,
+            image_height,
+            tile_size,
+            isect_offsets.contiguous(),
+            flatten_ids.contiguous(),
+            absgrad,
+        )
+    )
+
+    if padded_channels > 0:
+        render_semantics = render_semantics[..., :-padded_channels]
+    return render_colors, render_alphas, render_depths, render_semantics
+
+
 def rasterize_to_pixels_eval3d(
     means: Tensor,  # [..., N, 3]
     quats: Tensor,  # [..., N, 4]
@@ -1827,6 +1930,174 @@ class _RasterizeToPixels(torch.autograd.Function):
             v_conics,
             v_colors,
             v_opacities,
+            v_backgrounds,
+            None,  # masks
+            None,  # width
+            None,  # height
+            None,  # tile_size
+            None,  # isect_offsets
+            None,  # flatten_ids
+            None,  # absgrad
+        )
+
+
+class _RasterizeToPixelsWithSemantics(torch.autograd.Function):
+    """Rasterize RGB, depth, and explicit semantic channels."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        means2d: Tensor,  # [..., N, 2] or [nnz, 2]
+        conics: Tensor,  # [..., N, 3] or [nnz, 3]
+        colors: Tensor,  # [..., N, 3] or [nnz, 3]
+        opacities: Tensor,  # [..., N] or [nnz]
+        depths: Tensor,  # [..., N] or [nnz]
+        semantics: Tensor,  # [..., N, S] or [nnz, S]
+        backgrounds: Tensor,  # [..., 3], Optional
+        masks: Tensor,  # [..., tile_height, tile_width], Optional
+        width: int,
+        height: int,
+        tile_size: int,
+        isect_offsets: Tensor,  # [..., tile_height, tile_width]
+        flatten_ids: Tensor,  # [n_isects]
+        absgrad: bool,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        (
+            render_colors,
+            render_alphas,
+            render_depths,
+            render_semantics,
+            last_ids,
+        ) = _make_lazy_cuda_func("rasterize_to_pixels_3dgs_semantics_fwd")(
+            means2d,
+            conics,
+            colors,
+            opacities,
+            depths,
+            semantics,
+            backgrounds,
+            masks,
+            width,
+            height,
+            tile_size,
+            isect_offsets,
+            flatten_ids,
+        )
+
+        ctx.save_for_backward(
+            means2d,
+            conics,
+            colors,
+            opacities,
+            depths,
+            semantics,
+            backgrounds,
+            masks,
+            isect_offsets,
+            flatten_ids,
+            render_alphas,
+            last_ids,
+        )
+        ctx.width = width
+        ctx.height = height
+        ctx.tile_size = tile_size
+        ctx.absgrad = absgrad
+
+        render_alphas = render_alphas.float()
+        return render_colors, render_alphas, render_depths, render_semantics
+
+    @staticmethod
+    def backward(
+        ctx,
+        v_render_colors: Optional[Tensor],
+        v_render_alphas: Optional[Tensor],
+        v_render_depths: Optional[Tensor],
+        v_render_semantics: Optional[Tensor],
+    ):
+        (
+            means2d,
+            conics,
+            colors,
+            opacities,
+            depths,
+            semantics,
+            backgrounds,
+            masks,
+            isect_offsets,
+            flatten_ids,
+            render_alphas,
+            last_ids,
+        ) = ctx.saved_tensors
+        width = ctx.width
+        height = ctx.height
+        tile_size = ctx.tile_size
+        absgrad = ctx.absgrad
+
+        image_shape = render_alphas.shape[:-1]
+        if v_render_colors is None:
+            v_render_colors = torch.zeros(
+                *image_shape, colors.shape[-1], device=colors.device, dtype=colors.dtype
+            )
+        if v_render_alphas is None:
+            v_render_alphas = torch.zeros_like(render_alphas)
+        if v_render_depths is None:
+            v_render_depths = torch.zeros_like(render_alphas)
+        if v_render_semantics is None:
+            v_render_semantics = torch.zeros(
+                *image_shape,
+                semantics.shape[-1],
+                device=semantics.device,
+                dtype=semantics.dtype,
+            )
+
+        (
+            v_means2d_abs,
+            v_means2d,
+            v_conics,
+            v_colors,
+            v_opacities,
+            v_depths,
+            v_semantics,
+        ) = _make_lazy_cuda_func("rasterize_to_pixels_3dgs_semantics_bwd")(
+            means2d,
+            conics,
+            colors,
+            opacities,
+            depths,
+            semantics,
+            backgrounds,
+            masks,
+            width,
+            height,
+            tile_size,
+            isect_offsets,
+            flatten_ids,
+            render_alphas,
+            last_ids,
+            v_render_colors.contiguous(),
+            v_render_alphas.contiguous(),
+            v_render_depths.contiguous(),
+            v_render_semantics.contiguous(),
+            absgrad,
+        )
+
+        if absgrad:
+            means2d.absgrad = v_means2d_abs
+
+        if ctx.needs_input_grad[6]:
+            v_backgrounds = (v_render_colors * (1.0 - render_alphas).float()).sum(
+                dim=(-3, -2)
+            )
+        else:
+            v_backgrounds = None
+
+        return (
+            v_means2d,
+            v_conics,
+            v_colors,
+            v_opacities,
+            v_depths,
+            v_semantics,
             v_backgrounds,
             None,  # masks
             None,  # width

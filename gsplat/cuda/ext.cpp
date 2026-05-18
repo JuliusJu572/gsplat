@@ -734,6 +734,8 @@ TORCH_LIBRARY(gsplat, m) {
 
     m.def("rasterize_to_pixels_3dgs_fwd(Tensor means2d, Tensor conics, Tensor colors, Tensor opacities, Tensor? backgrounds, Tensor? masks, int image_width, int image_height, int tile_size, Tensor tile_offsets, Tensor flatten_ids) -> (Tensor, Tensor, Tensor)");
     m.def("rasterize_to_pixels_3dgs_bwd(Tensor means2d, Tensor conics, Tensor colors, Tensor opacities, Tensor? backgrounds, Tensor? masks, int image_width, int image_height, int tile_size, Tensor tile_offsets, Tensor flatten_ids, Tensor render_alphas, Tensor last_ids, Tensor v_render_colors, Tensor v_render_alphas, bool absgrad) -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
+    m.def("rasterize_to_pixels_3dgs_semantics_fwd(Tensor means2d, Tensor conics, Tensor colors, Tensor opacities, Tensor depths, Tensor semantics, Tensor? backgrounds, Tensor? masks, int image_width, int image_height, int tile_size, Tensor tile_offsets, Tensor flatten_ids) -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
+    m.def("rasterize_to_pixels_3dgs_semantics_bwd(Tensor means2d, Tensor conics, Tensor colors, Tensor opacities, Tensor depths, Tensor semantics, Tensor? backgrounds, Tensor? masks, int image_width, int image_height, int tile_size, Tensor tile_offsets, Tensor flatten_ids, Tensor render_alphas, Tensor last_ids, Tensor v_render_colors, Tensor v_render_alphas, Tensor v_render_depths, Tensor v_render_semantics, bool absgrad) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
     m.def("rasterize_to_indices_3dgs(int range_start, int range_end, Tensor transmittances, Tensor means2d, Tensor conics, Tensor opacities, int image_width, int image_height, int tile_size, Tensor tile_offsets, Tensor flatten_ids) -> (Tensor, Tensor)");
 #endif
 
@@ -794,6 +796,8 @@ TORCH_LIBRARY_IMPL(gsplat, CUDA, m) {
     m.impl("projection_ewa_3dgs_packed_bwd", &gsplat::projection_ewa_3dgs_packed_bwd);
     m.impl("rasterize_to_pixels_3dgs_fwd", &gsplat::rasterize_to_pixels_3dgs_fwd);
     m.impl("rasterize_to_pixels_3dgs_bwd", &gsplat::rasterize_to_pixels_3dgs_bwd);
+    m.impl("rasterize_to_pixels_3dgs_semantics_fwd", &gsplat::rasterize_to_pixels_3dgs_semantics_fwd);
+    m.impl("rasterize_to_pixels_3dgs_semantics_bwd", &gsplat::rasterize_to_pixels_3dgs_semantics_bwd);
     m.impl("rasterize_to_indices_3dgs", &gsplat::rasterize_to_indices_3dgs);
 #endif
 

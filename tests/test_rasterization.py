@@ -310,3 +310,73 @@ def test_rasterization(
             )
     else:
         torch.testing.assert_close(renders, _renders, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA device")
+@pytest.mark.skipif(not gsplat.has_3dgs(), reason="3DGS support isn't built in")
+@pytest.mark.parametrize("packed", [False, True])
+def test_rasterization_explicit_semantics_matches_extra_signals(packed: bool):
+    from gsplat.rendering import rasterization
+
+    torch.manual_seed(7)
+
+    C, N, S = 1, 64, 20
+    width, height = 64, 48
+    focal = 80.0
+    means = torch.randn((N, 3), device=device) * 0.2
+    means[:, 2] += 3.0
+    means.requires_grad_(True)
+    quats = torch.randn((N, 4), device=device)
+    scales = torch.full((N, 3), 0.08, device=device)
+    opacities = torch.full((N,), 0.6, device=device, requires_grad=True)
+    colors = torch.rand((N, 3), device=device, requires_grad=True)
+    semantics = torch.rand((N, S), device=device, requires_grad=True)
+    Ks = torch.tensor(
+        [[focal, 0.0, width / 2.0], [0.0, focal, height / 2.0], [0.0, 0.0, 1.0]],
+        device=device,
+    ).expand(C, -1, -1)
+    viewmats = torch.eye(4, device=device).expand(C, -1, -1)
+
+    renders, alphas, meta = rasterization(
+        means=means,
+        quats=quats,
+        scales=scales,
+        opacities=opacities,
+        colors=colors,
+        semantics=semantics,
+        viewmats=viewmats,
+        Ks=Ks,
+        width=width,
+        height=height,
+        render_mode="RGB+ED",
+        packed=packed,
+    )
+    reference_renders, reference_alphas, reference_meta = rasterization(
+        means=means,
+        quats=quats,
+        scales=scales,
+        opacities=opacities,
+        colors=colors,
+        extra_signals=semantics,
+        viewmats=viewmats,
+        Ks=Ks,
+        width=width,
+        height=height,
+        render_mode="RGB+ED",
+        packed=packed,
+    )
+
+    torch.testing.assert_close(alphas, reference_alphas, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(renders, reference_renders, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(
+        meta["render_semantics"],
+        reference_meta["render_extra_signals"],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+
+    meta["render_semantics"].sum().backward()
+    assert semantics.grad is not None
+    assert torch.isfinite(semantics.grad).all()
+    assert opacities.grad is not None
+    assert torch.isfinite(opacities.grad).all()
